@@ -2,7 +2,7 @@
 
 # name: digest-open-tracker
 # about: Same-domain digest open tracking pixel + async HTTP POST to external logger
-# version: 2.0.1
+# version: 2.0.2
 # authors: you
 
 # -------------------------
@@ -44,6 +44,7 @@ after_initialize do
   require "net/http"
   require "uri"
   require "json"
+  require "time"
   require_dependency "application_controller"
 
   module ::DigestOpenTracker
@@ -150,7 +151,10 @@ after_initialize do
     end
   end
 
-  Discourse::Application.routes.append do
+  # IMPORTANT:
+  # Use routes.prepend so this route is registered BEFORE Discourse's catch-all route.
+  # If you use append, you can get HTTP 200 + the Discourse HTML "page not found" shell instead of your gif.
+  Discourse::Application.routes.prepend do
     # ✅ No-extension endpoint (recommended for email pixels)
     get "/digest/open" => "digest_open_tracker#show"
 
@@ -190,7 +194,7 @@ after_initialize do
 
           req = Net::HTTP::Post.new(uri.request_uri)
           req["Content-Type"] = "application/x-www-form-urlencoded"
-          req["User-Agent"] = "discourse-digest-open-tracker/2.0.1"
+          req["User-Agent"] = "discourse-digest-open-tracker/2.0.2"
           req.body = URI.encode_www_form(payload)
 
           http.request(req)
