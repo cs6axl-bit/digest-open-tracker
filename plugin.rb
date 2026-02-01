@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# name: discourse-digest-open-pixel
+# name: -digest-open-tracker
 # about: Same-domain digest open tracking pixel + async remote MySQL logging
 # version: 1.0.1
 # authors: you
