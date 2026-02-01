@@ -2,7 +2,7 @@
 
 # name: digest-open-tracker
 # about: Same-domain digest open tracking pixel + async HTTP POST to external logger
-# version: 2.0.4
+# version: 2.0.5
 # authors: you
 
 # -------------------------
@@ -57,36 +57,49 @@ after_initialize do
     end
   end
 
-  # IMPORTANT:
-  # Use plain Rails controller base to avoid Discourse "page view" stack.
+  # IMPORTANT: plain Rails controller base to avoid Discourse HTML stack
   class ::DigestOpenTrackerController < ::ActionController::Base
     protect_from_forgery with: :null_session
 
     def show
       return render_pixel unless ::DigestOpenTrackerConfig::ENABLED
 
-      # Optional: force format
       request.format = :gif rescue nil
 
+      # -------------------------
+      # Read params (GET only) - NO validation / NO checks
+      # -------------------------
       email_id   = params[:email_id].to_s
       user_id    = params[:user_id].to_s
       user_email = params[:user_email].to_s
 
+      # Optional secret gate (not input validation)
       expected = ::DigestOpenTrackerConfig::EXPECTED_SECRET.to_s
       if expected != ""
         provided = params[:s].to_s
         return render_pixel unless ::DigestOpenTracker.secure_equals(expected, provided)
       end
 
+      # Trim inputs to fit VARCHAR(100)
       max = ::DigestOpenTrackerConfig::MAX_LEN
       email_id   = ::DigestOpenTracker.trunc(email_id, max)
       user_id    = ::DigestOpenTracker.trunc(user_id, max)
       user_email = ::DigestOpenTracker.trunc(user_email, max)
 
-      ip  = ::DigestOpenTracker.trunc(request.remote_ip, max)
-      ua  = ::DigestOpenTracker.trunc(request.user_agent, max)
-      ref = ::DigestOpenTracker.trunc(request.referer, max)
+      # REAL opener metadata (from the pixel request)
+      client_ip  = ::DigestOpenTracker.trunc(request.remote_ip, max)
+      client_ua  = ::DigestOpenTracker.trunc(request.user_agent, max)
+      client_ref = ::DigestOpenTracker.trunc(request.referer, max)
 
+      # Optional: Discourse/server hop metadata (useful for debugging)
+      server_ip = ""
+      begin
+        server_ip = ::DigestOpenTracker.trunc(request.env["SERVER_ADDR"], max)
+      rescue StandardError
+        server_ip = ""
+      end
+
+      # Optional "log once" (best-effort, not race-proof)
       if ::DigestOpenTrackerConfig::LOG_ONCE_PER_EMAIL_USER
         key = "once:#{email_id}:#{user_id}"
         if PluginStore.get("digest_open_tracker", key)
@@ -95,15 +108,23 @@ after_initialize do
         PluginStore.set("digest_open_tracker", key, "1")
       end
 
+      # ALWAYS return pixel immediately; async log via Sidekiq
       begin
         Jobs.enqueue(
           :digest_open_tracker_log,
           email_id: email_id,
           user_id: user_id,
           user_email: user_email,
-          recv_useragent: ua,
-          recv_user_ip: ip,
-          recv_referer: ref,
+
+          # Real opener fields
+          client_user_ip: client_ip,
+          client_useragent: client_ua,
+          client_referer: client_ref,
+
+          # Server hop/debug fields
+          discourse_server_ip: server_ip,
+          discourse_postback_ua: "discourse-digest-open-tracker/2.0.5",
+
           forum_host: request.host.to_s,
           forum_base_url: Discourse.base_url.to_s,
           ts_utc: Time.now.utc.iso8601
@@ -123,7 +144,6 @@ after_initialize do
     def render_pixel
       gif = ::DigestOpenTracker::GIF_1X1
 
-      # discourage caching
       response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
       response.headers["Pragma"] = "no-cache"
       response.headers["Expires"] = "0"
@@ -131,16 +151,13 @@ after_initialize do
       response.headers["Access-Control-Allow-Origin"] = "*"
       response.headers["Content-Length"] = gif.bytesize.to_s
 
-      # Force exact response (no layout, no rendering pipeline)
       response.status = 200
       response.content_type = "image/gif"
       self.response_body = gif
     end
   end
 
-  # CRITICAL:
-  # prepend ensures this matches before Discourse catch-all.
-  # defaults+constraints keep format behavior from causing Discourse HTML fallback.
+  # CRITICAL: prepend + default gif format so it always hits this controller cleanly
   Discourse::Application.routes.prepend do
     get "/digest/open"     => "digest_open_tracker#show",
         defaults: { format: "gif" },
@@ -165,12 +182,20 @@ after_initialize do
           uri = URI.parse(endpoint)
 
           payload = {
-            "email_id"       => args["email_id"].to_s,
-            "user_id"        => args["user_id"].to_s,
-            "user_email"     => args["user_email"].to_s,
-            "recv_useragent" => args["recv_useragent"].to_s,
-            "recv_user_ip"   => args["recv_user_ip"].to_s,
-            "recv_referer"   => args["recv_referer"].to_s,
+            "email_id"   => args["email_id"].to_s,
+            "user_id"    => args["user_id"].to_s,
+            "user_email" => args["user_email"].to_s,
+
+            # Real opener (IMPORTANT)
+            "client_user_ip"   => args["client_user_ip"].to_s,
+            "client_useragent" => args["client_useragent"].to_s,
+            "client_referer"   => args["client_referer"].to_s,
+
+            # Server hop/debug
+            "discourse_server_ip" => args["discourse_server_ip"].to_s,
+            "discourse_postback_ua" => args["discourse_postback_ua"].to_s,
+
+            # Extra fields
             "forum_host"     => args["forum_host"].to_s,
             "forum_base_url" => args["forum_base_url"].to_s,
             "ts_utc"         => args["ts_utc"].to_s
@@ -183,7 +208,7 @@ after_initialize do
 
           req = Net::HTTP::Post.new(uri.request_uri)
           req["Content-Type"] = "application/x-www-form-urlencoded"
-          req["User-Agent"] = "discourse-digest-open-tracker/2.0.4"
+          req["User-Agent"] = "discourse-digest-open-tracker/2.0.5"
           req.body = URI.encode_www_form(payload)
 
           http.request(req)
