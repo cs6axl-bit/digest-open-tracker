@@ -2,7 +2,7 @@
 
 # name: digest-open-tracker
 # about: Same-domain digest open tracking pixel + async HTTP POST to external logger
-# version: 2.0.0
+# version: 2.0.1
 # authors: you
 
 # -------------------------
@@ -12,10 +12,12 @@ module ::DigestOpenTrackerConfig
   ENABLED = true
 
   # Pixel endpoint served by Discourse on same domain:
-  #   https://forum.example.com/digest/open.gif?email_id=...&user_id=...&user_email=...
+  #   https://forum.example.com/digest/open?email_id=...&user_id=...&user_email=...
+  #
+  # (Optional legacy)
+  #   https://forum.example.com/digest/open.gif?...
 
   # External logging endpoint (receives POST)
-  # Example: https://ai.templetrends.com/digest_open_log.php
   LOG_ENDPOINT_URL = "https://ai.templetrends.com/digest_open_log.php"
 
   # Optional secret gate (empty = disabled). If set, pixel URL must include &s=...
@@ -115,7 +117,6 @@ after_initialize do
           recv_useragent: ua,
           recv_user_ip: ip,
           recv_referer: ref,
-          # Useful metadata if you want it on the remote side:
           forum_host: request.host.to_s,
           forum_base_url: Discourse.base_url.to_s,
           ts_utc: Time.now.utc.iso8601
@@ -135,23 +136,25 @@ after_initialize do
     def render_pixel
       gif = ::DigestOpenTracker::GIF_1X1
 
-      response.headers["Content-Type"] = "image/gif"
-      response.headers["Content-Length"] = gif.bytesize.to_s
-      response.headers["X-Content-Type-Options"] = "nosniff"
-
       # discourage caching
       response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
       response.headers["Pragma"] = "no-cache"
       response.headers["Expires"] = "0"
+      response.headers["X-Content-Type-Options"] = "nosniff"
 
       # match your PHP behavior
       response.headers["Access-Control-Allow-Origin"] = "*"
 
-      render plain: gif, layout: false
+      # Send binary gif
+      send_data gif, type: "image/gif", disposition: "inline"
     end
   end
 
   Discourse::Application.routes.append do
+    # ✅ No-extension endpoint (recommended for email pixels)
+    get "/digest/open" => "digest_open_tracker#show"
+
+    # (Optional) keep legacy .gif endpoint too
     get "/digest/open.gif" => "digest_open_tracker#show"
   end
 
@@ -168,8 +171,6 @@ after_initialize do
         begin
           uri = URI.parse(endpoint)
 
-          # Build POST form data similar to what your PHP stored
-          # (your remote endpoint can accept POST instead of GET)
           payload = {
             "email_id"       => args["email_id"].to_s,
             "user_id"        => args["user_id"].to_s,
@@ -177,8 +178,6 @@ after_initialize do
             "recv_useragent" => args["recv_useragent"].to_s,
             "recv_user_ip"   => args["recv_user_ip"].to_s,
             "recv_referer"   => args["recv_referer"].to_s,
-
-            # extra fields (optional)
             "forum_host"     => args["forum_host"].to_s,
             "forum_base_url" => args["forum_base_url"].to_s,
             "ts_utc"         => args["ts_utc"].to_s
@@ -191,10 +190,9 @@ after_initialize do
 
           req = Net::HTTP::Post.new(uri.request_uri)
           req["Content-Type"] = "application/x-www-form-urlencoded"
-          req["User-Agent"] = "discourse-digest-open-tracker/2.0.0"
+          req["User-Agent"] = "discourse-digest-open-tracker/2.0.1"
           req.body = URI.encode_www_form(payload)
 
-          # Fire request (ignore response; swallow errors)
           http.request(req)
         rescue => e
           Rails.logger.warn("[digest-open-tracker] postback error: #{e.class}: #{e.message}")
