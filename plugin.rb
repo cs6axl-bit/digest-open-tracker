@@ -2,7 +2,7 @@
 
 # name: digest-open-tracker
 # about: Same-domain digest open tracking pixel + async HTTP POST to external logger
-# version: 2.0.2
+# version: 2.0.4
 # authors: you
 
 # -------------------------
@@ -11,12 +11,6 @@
 module ::DigestOpenTrackerConfig
   ENABLED = true
 
-  # Pixel endpoint served by Discourse on same domain:
-  #   https://forum.example.com/digest/open?email_id=...&user_id=...&user_email=...
-  #
-  # (Optional legacy)
-  #   https://forum.example.com/digest/open.gif?...
-
   # External logging endpoint (receives POST)
   LOG_ENDPOINT_URL = "https://ai.templetrends.com/digest_open_log.php"
 
@@ -24,7 +18,6 @@ module ::DigestOpenTrackerConfig
   EXPECTED_SECRET = ""
 
   # Optional: best-effort "log once" per (email_id,user_id)
-  # Not race-proof; uses PluginStore keys.
   LOG_ONCE_PER_EMAIL_USER = false
 
   # HTTP timeouts for logger POST (keep short)
@@ -35,7 +28,7 @@ module ::DigestOpenTrackerConfig
   # 0 = closest to your PHP (swallow failures, no retry)
   JOB_RETRY_COUNT = 0
 
-  # Extra safety: cap User-Agent/Referer/IP to 100 (like your PHP)
+  # Extra safety: cap User-Agent/Referer/IP to 100
   MAX_LEN = 100
 end
 
@@ -45,7 +38,6 @@ after_initialize do
   require "uri"
   require "json"
   require "time"
-  require_dependency "application_controller"
 
   module ::DigestOpenTracker
     GIF_1X1 = Base64.decode64("R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==").freeze
@@ -65,28 +57,27 @@ after_initialize do
     end
   end
 
-  class ::DigestOpenTrackerController < ::ApplicationController
-    skip_before_action :verify_authenticity_token, raise: false
-    skip_before_action :redirect_to_login_if_required, raise: false
+  # IMPORTANT:
+  # Use plain Rails controller base to avoid Discourse "page view" stack.
+  class ::DigestOpenTrackerController < ::ActionController::Base
+    protect_from_forgery with: :null_session
 
     def show
       return render_pixel unless ::DigestOpenTrackerConfig::ENABLED
 
-      # -------------------------
-      # Read params (GET only) - NO validation / NO checks
-      # -------------------------
+      # Optional: force format
+      request.format = :gif rescue nil
+
       email_id   = params[:email_id].to_s
       user_id    = params[:user_id].to_s
       user_email = params[:user_email].to_s
 
-      # Optional secret gate (not input validation)
       expected = ::DigestOpenTrackerConfig::EXPECTED_SECRET.to_s
       if expected != ""
         provided = params[:s].to_s
         return render_pixel unless ::DigestOpenTracker.secure_equals(expected, provided)
       end
 
-      # Trim inputs to fit the same spirit as VARCHAR(100)
       max = ::DigestOpenTrackerConfig::MAX_LEN
       email_id   = ::DigestOpenTracker.trunc(email_id, max)
       user_id    = ::DigestOpenTracker.trunc(user_id, max)
@@ -96,7 +87,6 @@ after_initialize do
       ua  = ::DigestOpenTracker.trunc(request.user_agent, max)
       ref = ::DigestOpenTracker.trunc(request.referer, max)
 
-      # Optional "log once" (best-effort, not race-proof)
       if ::DigestOpenTrackerConfig::LOG_ONCE_PER_EMAIL_USER
         key = "once:#{email_id}:#{user_id}"
         if PluginStore.get("digest_open_tracker", key)
@@ -105,10 +95,6 @@ after_initialize do
         PluginStore.set("digest_open_tracker", key, "1")
       end
 
-      # -------------------------
-      # ALWAYS return the pixel immediately
-      # -------------------------
-      # Async log via Sidekiq. Enqueue failures are swallowed.
       begin
         Jobs.enqueue(
           :digest_open_tracker_log,
@@ -142,24 +128,27 @@ after_initialize do
       response.headers["Pragma"] = "no-cache"
       response.headers["Expires"] = "0"
       response.headers["X-Content-Type-Options"] = "nosniff"
-
-      # match your PHP behavior
       response.headers["Access-Control-Allow-Origin"] = "*"
+      response.headers["Content-Length"] = gif.bytesize.to_s
 
-      # Send binary gif
-      send_data gif, type: "image/gif", disposition: "inline"
+      # Force exact response (no layout, no rendering pipeline)
+      response.status = 200
+      response.content_type = "image/gif"
+      self.response_body = gif
     end
   end
 
-  # IMPORTANT:
-  # Use routes.prepend so this route is registered BEFORE Discourse's catch-all route.
-  # If you use append, you can get HTTP 200 + the Discourse HTML "page not found" shell instead of your gif.
+  # CRITICAL:
+  # prepend ensures this matches before Discourse catch-all.
+  # defaults+constraints keep format behavior from causing Discourse HTML fallback.
   Discourse::Application.routes.prepend do
-    # ✅ No-extension endpoint (recommended for email pixels)
-    get "/digest/open" => "digest_open_tracker#show"
+    get "/digest/open"     => "digest_open_tracker#show",
+        defaults: { format: "gif" },
+        constraints: { format: /(gif|html|js|json)?/ }
 
-    # (Optional) keep legacy .gif endpoint too
-    get "/digest/open.gif" => "digest_open_tracker#show"
+    # optional legacy
+    get "/digest/open.gif" => "digest_open_tracker#show",
+        defaults: { format: "gif" }
   end
 
   module ::Jobs
@@ -194,7 +183,7 @@ after_initialize do
 
           req = Net::HTTP::Post.new(uri.request_uri)
           req["Content-Type"] = "application/x-www-form-urlencoded"
-          req["User-Agent"] = "discourse-digest-open-tracker/2.0.2"
+          req["User-Agent"] = "discourse-digest-open-tracker/2.0.4"
           req.body = URI.encode_www_form(payload)
 
           http.request(req)
