@@ -7,7 +7,7 @@
 
 module ::DigestOpenTrackerConfig
   ENABLED = true
-  LOG_ENDPOINT_URL = "https://ai.templetrends.com/digest_open_log.php"
+  LOG_ENDPOINT_URL = "http://172.17.0.1:8081/digest_open_log.php"
 
   # Same 64-hex key as digest-report2 + PHP (needed only if you ever want to decrypt in Ruby;
   # for this design we pass token t to PHP for decrypt, but we keep it here for future.)
